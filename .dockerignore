@@ -1,14 +1,36 @@
+# Data directories
 data/
 data-auth/
 public/
+
+# Documentation
 *.md
+!go.mod
+!go.sum
+
+# Git files
 .git/
 .gitignore
+.github/
+
+# Docker files
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+# Build artifacts
 s3dir
 *.exe
 coverage.out
 *.prof
+
+# Development files
+.vscode/
+.idea/
+
+# Examples (not needed for build, only for documentation)
+examples/
+
+# Test files (tests run in CI, not needed in container)
 test/
+*_test.go

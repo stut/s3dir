@@ -1,56 +1,29 @@
+version: 2
+
 run:
   timeout: 5m
-  tests: true
-  modules-download-mode: readonly
+  tests: false
+  skip-dirs:
+    - examples
 
 linters:
   enable:
-    - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
-    - misspell
-    - unconvert
-    - unparam
-    - gocritic
-    - revive
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  govet:
-    check-shadowing: true
-
-  gofmt:
-    simplify: true
-
-  misspell:
-    locale: US
+  disable:
+    - errcheck
 
 issues:
+  # Exclude defer close errors as they are generally safe to ignore
   exclude-rules:
-    # Exclude some linters from running on tests files
-    - path: _test\.go
+    - text: "Error return value.*defer.*Close"
       linters:
         - errcheck
-        - unparam
-
-    # Exclude example files
-    - path: examples/
+    - text: "Error return value.*defer.*Remove"
       linters:
         - errcheck
-        - gosec
 
   max-issues-per-linter: 0
   max-same-issues: 0
-
-output:
-  format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true

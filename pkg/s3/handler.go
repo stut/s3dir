@@ -210,7 +210,11 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
 
 	// Copy object data to response
-	io.Copy(w, reader)
+	if _, err := io.Copy(w, reader); err != nil {
+		// Error writing to response - log but can't send error to client
+		// since headers are already sent
+		return
+	}
 }
 
 // headObject retrieves object metadata
@@ -338,8 +342,12 @@ func writeXML(w http.ResponseWriter, data interface{}, statusCode int) {
 		return
 	}
 
-	w.Write([]byte(xml.Header))
-	w.Write(output)
+	if _, err := w.Write([]byte(xml.Header)); err != nil {
+		return
+	}
+	if _, err := w.Write(output); err != nil {
+		return
+	}
 }
 
 // writeError writes an S3 error response

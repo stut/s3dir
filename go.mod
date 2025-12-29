@@ -1,6 +1,6 @@
 module github.com/stut/s3dir
 
-go 1.25.5
+go 1.21
 
 require github.com/aws/aws-sdk-go v1.55.8
 

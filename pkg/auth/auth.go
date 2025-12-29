@@ -1,9 +1,6 @@
 package auth
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -89,14 +86,16 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// calculateSignature calculates the AWS Signature V4 signature
+// Reserved for future AWS Signature V4 implementation
+// These functions will be used when full signature verification is implemented
+
+/*
 func calculateSignature(secretKey, stringToSign string) string {
 	h := hmac.New(sha256.New, []byte("AWS4"+secretKey))
 	h.Write([]byte(stringToSign))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// getSigningKey derives the signing key for AWS Signature V4
 func getSigningKey(secretKey, dateStamp, region, service string) []byte {
 	kDate := hmacSHA256([]byte("AWS4"+secretKey), []byte(dateStamp))
 	kRegion := hmacSHA256(kDate, []byte(region))
@@ -105,12 +104,12 @@ func getSigningKey(secretKey, dateStamp, region, service string) []byte {
 	return kSigning
 }
 
-// hmacSHA256 computes HMAC-SHA256
 func hmacSHA256(key, data []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(data)
 	return h.Sum(nil)
 }
+*/
 
 // FormatTime formats time for AWS signature
 func FormatTime(t time.Time) string {

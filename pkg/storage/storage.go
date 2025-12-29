@@ -58,9 +58,12 @@ func (s *Storage) PutObject(bucket, key string, reader io.Reader, size int64) er
 
 	// Copy data to temporary file
 	_, err = io.Copy(tmpFile, reader)
-	tmpFile.Close()
+	closeErr := tmpFile.Close()
 	if err != nil {
 		return fmt.Errorf("failed to write object: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close temporary file: %w", closeErr)
 	}
 
 	// Move temporary file to final location

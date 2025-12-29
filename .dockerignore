@@ -1,0 +1,14 @@
+data/
+data-auth/
+public/
+*.md
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+s3dir
+*.exe
+coverage.out
+*.prof
+test/

@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  s3dir:
+    build: .
+    image: s3dir:latest
+    container_name: s3dir
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - S3DIR_HOST=0.0.0.0
+      - S3DIR_PORT=8000
+      - S3DIR_DATA_DIR=/data
+      - S3DIR_ENABLE_AUTH=false
+      - S3DIR_READ_ONLY=false
+      - S3DIR_VERBOSE=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Example with authentication enabled
+  s3dir-auth:
+    build: .
+    image: s3dir:latest
+    container_name: s3dir-auth
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./data-auth:/data
+    environment:
+      - S3DIR_HOST=0.0.0.0
+      - S3DIR_PORT=8000
+      - S3DIR_DATA_DIR=/data
+      - S3DIR_ENABLE_AUTH=true
+      - S3DIR_ACCESS_KEY_ID=myaccesskey
+      - S3DIR_SECRET_ACCESS_KEY=mysecretkey
+      - S3DIR_READ_ONLY=false
+      - S3DIR_VERBOSE=true
+    restart: unless-stopped
+    profiles:
+      - auth
+
+  # Example read-only mode for serving static files
+  s3dir-readonly:
+    build: .
+    image: s3dir:latest
+    container_name: s3dir-readonly
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./public:/data:ro
+    environment:
+      - S3DIR_HOST=0.0.0.0
+      - S3DIR_PORT=8000
+      - S3DIR_DATA_DIR=/data
+      - S3DIR_READ_ONLY=true
+      - S3DIR_VERBOSE=false
+    restart: unless-stopped
+    profiles:
+      - readonly

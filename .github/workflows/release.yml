@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build binaries
+        run: |
+          # Build for multiple platforms
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-linux-amd64 ./cmd/s3dir
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o s3dir-linux-arm64 ./cmd/s3dir
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-darwin-amd64 ./cmd/s3dir
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o s3dir-darwin-arm64 ./cmd/s3dir
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-windows-amd64.exe ./cmd/s3dir
+
+          # Create archives
+          tar czf s3dir-linux-amd64.tar.gz s3dir-linux-amd64
+          tar czf s3dir-linux-arm64.tar.gz s3dir-linux-arm64
+          tar czf s3dir-darwin-amd64.tar.gz s3dir-darwin-amd64
+          tar czf s3dir-darwin-arm64.tar.gz s3dir-darwin-arm64
+          zip s3dir-windows-amd64.zip s3dir-windows-amd64.exe
+
+          # Generate checksums
+          sha256sum s3dir-*.tar.gz s3dir-*.zip > checksums.txt
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          cat > release_notes.md << 'EOF'
+          ## S3Dir ${{ github.ref_name }}
+
+          ### Installation
+
+          #### Docker
+          ```bash
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/s3dir:${{ github.ref_name }}
+          ```
+
+          #### Binary Download
+          Download the appropriate binary for your platform below.
+
+          #### From Source
+          ```bash
+          git clone https://github.com/${{ github.repository }}
+          cd s3dir
+          git checkout ${{ github.ref_name }}
+          go build -o s3dir ./cmd/s3dir
+          ```
+
+          ### Quick Start
+          ```bash
+          # Extract binary (Linux/macOS example)
+          tar xzf s3dir-linux-amd64.tar.gz
+
+          # Run
+          ./s3dir-linux-amd64
+          ```
+
+          ### Changes
+          See commit history for detailed changes.
+
+          ### Checksums
+          See `checksums.txt` for SHA256 checksums of all artifacts.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            s3dir-*.tar.gz
+            s3dir-*.zip
+            checksums.txt
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

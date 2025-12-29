@@ -20,7 +20,8 @@ type ObjectInfo struct {
 
 // Storage provides filesystem-based storage for S3 objects
 type Storage struct {
-	baseDir string
+	baseDir   string
+	multipart *MultipartManager
 }
 
 // New creates a new Storage instance
@@ -35,7 +36,8 @@ func New(baseDir string) (*Storage, error) {
 	}
 
 	return &Storage{
-		baseDir: absPath,
+		baseDir:   absPath,
+		multipart: NewMultipartManager(absPath),
 	}, nil
 }
 
@@ -322,4 +324,40 @@ func (s *Storage) cleanupEmptyDirs(path, stopPath string) {
 		os.Remove(path)
 		path = filepath.Dir(path)
 	}
+}
+
+// Multipart upload methods
+
+// InitiateMultipartUpload starts a new multipart upload
+func (s *Storage) InitiateMultipartUpload(bucket, key string) (string, error) {
+	// Verify bucket exists
+	if err := s.HeadBucket(bucket); err != nil {
+		return "", err
+	}
+	return s.multipart.InitiateUpload(bucket, key)
+}
+
+// UploadPart uploads a part of a multipart upload
+func (s *Storage) UploadPart(uploadID string, partNumber int, reader io.Reader, size int64) (string, error) {
+	return s.multipart.UploadPart(uploadID, partNumber, reader, size)
+}
+
+// CompleteMultipartUpload completes a multipart upload
+func (s *Storage) CompleteMultipartUpload(uploadID string, parts []CompletePart) (string, error) {
+	return s.multipart.CompleteUpload(uploadID, parts)
+}
+
+// AbortMultipartUpload aborts a multipart upload
+func (s *Storage) AbortMultipartUpload(uploadID string) error {
+	return s.multipart.AbortUpload(uploadID)
+}
+
+// ListMultipartUploadParts lists parts of a multipart upload
+func (s *Storage) ListMultipartUploadParts(uploadID string) ([]*UploadPart, error) {
+	return s.multipart.ListParts(uploadID)
+}
+
+// ListMultipartUploads lists in-progress multipart uploads
+func (s *Storage) ListMultipartUploads(bucket string) []*MultipartUpload {
+	return s.multipart.ListUploads(bucket)
 }

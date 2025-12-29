@@ -66,6 +66,12 @@ func (h *Handler) handleServiceOperation(w http.ResponseWriter, r *http.Request)
 
 // handleBucketOperation handles bucket-level operations
 func (h *Handler) handleBucketOperation(w http.ResponseWriter, r *http.Request, bucket string) {
+	// Check for multipart uploads listing
+	if r.Method == http.MethodGet && r.URL.Query().Has("uploads") {
+		h.listMultipartUploads(w, r, bucket)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		h.listObjects(w, r, bucket)
@@ -90,6 +96,53 @@ func (h *Handler) handleBucketOperation(w http.ResponseWriter, r *http.Request, 
 
 // handleObjectOperation handles object-level operations
 func (h *Handler) handleObjectOperation(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	query := r.URL.Query()
+
+	// Handle multipart upload operations
+	if uploadID := query.Get("uploadId"); uploadID != "" {
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			// List parts
+			h.listParts(w, r, bucket, key, uploadID)
+		case http.MethodPut:
+			// Upload part
+			if partNumber := query.Get("partNumber"); partNumber != "" {
+				h.uploadPart(w, r, bucket, key, uploadID, partNumber)
+			} else {
+				writeError(w, "InvalidRequest", "partNumber is required", http.StatusBadRequest)
+			}
+		case http.MethodPost:
+			// Complete multipart upload
+			h.completeMultipartUpload(w, r, bucket, key, uploadID)
+		case http.MethodDelete:
+			// Abort multipart upload
+			h.abortMultipartUpload(w, r, bucket, key, uploadID)
+		default:
+			writeError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	// Initiate multipart upload
+	if query.Has("uploads") {
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPost {
+			h.initiateMultipartUpload(w, r, bucket, key)
+		} else {
+			writeError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	// Standard object operations
 	switch r.Method {
 	case http.MethodGet:
 		h.getObject(w, r, bucket, key)
@@ -358,4 +411,184 @@ func writeError(w http.ResponseWriter, code, message string, statusCode int) {
 	}
 
 	writeXML(w, errorResponse, statusCode)
+}
+
+// initiateMultipartUpload initiates a multipart upload
+func (h *Handler) initiateMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	uploadID, err := h.storage.InitiateMultipartUpload(bucket, key)
+	if err != nil {
+		writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	response := InitiateMultipartUploadResult{
+		Bucket:   bucket,
+		Key:      key,
+		UploadID: uploadID,
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
+// uploadPart uploads a part of a multipart upload
+func (h *Handler) uploadPart(w http.ResponseWriter, r *http.Request, bucket, key, uploadID, partNumberStr string) {
+	partNumber, err := strconv.Atoi(partNumberStr)
+	if err != nil || partNumber < 1 || partNumber > 10000 {
+		writeError(w, "InvalidArgument", "Invalid part number", http.StatusBadRequest)
+		return
+	}
+
+	contentLength := r.ContentLength
+	if contentLength < 0 {
+		writeError(w, "MissingContentLength", "Content-Length header is required", http.StatusLengthRequired)
+		return
+	}
+
+	etag, err := h.storage.UploadPart(uploadID, partNumber, r.Body, contentLength)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("ETag", etag)
+	w.WriteHeader(http.StatusOK)
+}
+
+// completeMultipartUpload completes a multipart upload
+func (h *Handler) completeMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key, uploadID string) {
+	// Parse the request body
+	var complete CompleteMultipartUpload
+	if err := xml.NewDecoder(r.Body).Decode(&complete); err != nil {
+		writeError(w, "MalformedXML", "Invalid XML", http.StatusBadRequest)
+		return
+	}
+
+	// Convert parts to storage.CompletePart slice
+	parts := make([]storage.CompletePart, len(complete.Parts))
+	for i, part := range complete.Parts {
+		parts[i] = storage.CompletePart{
+			PartNumber: part.PartNumber,
+			ETag:       part.ETag,
+		}
+	}
+
+	etag, err := h.storage.CompleteMultipartUpload(uploadID, parts)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "part") {
+			writeError(w, "InvalidPart", err.Error(), http.StatusBadRequest)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	response := CompleteMultipartUploadResult{
+		Location: fmt.Sprintf("/%s/%s", bucket, key),
+		Bucket:   bucket,
+		Key:      key,
+		ETag:     etag,
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
+// abortMultipartUpload aborts a multipart upload
+func (h *Handler) abortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key, uploadID string) {
+	if err := h.storage.AbortMultipartUpload(uploadID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// listParts lists the parts of a multipart upload
+func (h *Handler) listParts(w http.ResponseWriter, r *http.Request, bucket, key, uploadID string) {
+	parts, err := h.storage.ListMultipartUploadParts(uploadID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	var partsList []Part
+	for _, p := range parts {
+		partsList = append(partsList, Part{
+			PartNumber:   p.PartNumber,
+			LastModified: p.LastModified.Format(time.RFC3339),
+			ETag:         p.ETag,
+			Size:         p.Size,
+		})
+	}
+
+	response := ListPartsResult{
+		Bucket:   bucket,
+		Key:      key,
+		UploadID: uploadID,
+		Initiator: Initiator{
+			ID:          "s3dir",
+			DisplayName: "s3dir",
+		},
+		Owner: Owner{
+			ID:          "s3dir",
+			DisplayName: "s3dir",
+		},
+		StorageClass:         "STANDARD",
+		PartNumberMarker:     0,
+		NextPartNumberMarker: 0,
+		MaxParts:             1000,
+		IsTruncated:          false,
+		Parts:                partsList,
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
+// listMultipartUploads lists multipart uploads
+func (h *Handler) listMultipartUploads(w http.ResponseWriter, r *http.Request, bucket string) {
+	uploads := h.storage.ListMultipartUploads(bucket)
+
+	var uploadsList []Upload
+	for _, u := range uploads {
+		uploadsList = append(uploadsList, Upload{
+			Key:      u.Key,
+			UploadID: u.UploadID,
+			Initiator: Initiator{
+				ID:          "s3dir",
+				DisplayName: "s3dir",
+			},
+			Owner: Owner{
+				ID:          "s3dir",
+				DisplayName: "s3dir",
+			},
+			StorageClass: "STANDARD",
+			Initiated:    u.Initiated.Format(time.RFC3339),
+		})
+	}
+
+	response := ListMultipartUploadsResult{
+		Bucket:             bucket,
+		KeyMarker:          "",
+		UploadIDMarker:     "",
+		NextKeyMarker:      "",
+		NextUploadIDMarker: "",
+		MaxUploads:         1000,
+		IsTruncated:        false,
+		Uploads:            uploadsList,
+	}
+
+	writeXML(w, response, http.StatusOK)
 }

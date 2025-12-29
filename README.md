@@ -5,6 +5,7 @@ S3Dir is a lightweight, high-performance S3-compatible API server that exposes a
 ## Features
 
 - **S3-Compatible API**: Implements core S3 operations (GET, PUT, DELETE, HEAD, LIST)
+- **Multipart Uploads**: Full support for large file uploads via S3 multipart upload protocol
 - **File-based Storage**: Uses the local filesystem for simple, transparent storage
 - **Multiple Buckets**: Support for creating and managing multiple buckets
 - **Authentication**: Optional AWS Signature V4 authentication support
@@ -125,6 +126,15 @@ S3DIR_READ_ONLY=true ./s3dir
 - **GetObject** (GET): Download an object
 - **DeleteObject** (DELETE): Delete an object
 - **HeadObject** (HEAD): Get object metadata
+
+### Multipart Upload Operations
+
+- **InitiateMultipartUpload** (POST): Start a multipart upload
+- **UploadPart** (PUT): Upload a part of a multipart upload
+- **CompleteMultipartUpload** (POST): Complete a multipart upload
+- **AbortMultipartUpload** (DELETE): Abort an in-progress multipart upload
+- **ListParts** (GET): List parts of a multipart upload
+- **ListMultipartUploads** (GET): List in-progress multipart uploads
 
 ## Use Cases
 
@@ -287,6 +297,127 @@ s3.listObjectsV2({
 });
 ```
 
+## Multipart Uploads
+
+S3Dir supports multipart uploads for uploading large files efficiently. Files are uploaded in parts and then assembled on the server.
+
+### Automatic Cleanup
+
+S3Dir includes automatic cleanup mechanisms to prevent orphaned uploads from consuming disk space:
+
+- **Startup Cleanup**: On server startup, all incomplete multipart uploads from previous runs are automatically cleaned up
+- **Background Cleanup**: A background process runs every hour to remove uploads with no activity for more than 24 hours
+- **Manual Abort**: Clients can explicitly abort uploads using the AbortMultipartUpload API
+
+This ensures that abandoned uploads (due to client crashes, network disconnects, etc.) don't persist indefinitely.
+
+### AWS CLI
+
+```bash
+# Upload a large file using multipart upload (automatic)
+aws --endpoint-url=http://localhost:8000 s3 cp large-file.bin s3://my-bucket/
+
+# The AWS CLI automatically uses multipart upload for files larger than 8MB
+```
+
+### Python (boto3)
+
+```python
+import boto3
+
+s3 = boto3.client(
+    's3',
+    endpoint_url='http://localhost:8000',
+    aws_access_key_id='dummy',
+    aws_secret_access_key='dummy',
+)
+
+# Automatic multipart upload for large files
+s3.upload_file('large-file.bin', 'my-bucket', 'large-file.bin')
+
+# Manual multipart upload
+response = s3.create_multipart_upload(Bucket='my-bucket', Key='manual-upload.bin')
+upload_id = response['UploadId']
+
+# Upload parts
+parts = []
+with open('large-file.bin', 'rb') as f:
+    part_number = 1
+    while True:
+        data = f.read(5 * 1024 * 1024)  # 5MB chunks
+        if not data:
+            break
+        
+        part = s3.upload_part(
+            Bucket='my-bucket',
+            Key='manual-upload.bin',
+            PartNumber=part_number,
+            UploadId=upload_id,
+            Body=data
+        )
+        
+        parts.append({
+            'PartNumber': part_number,
+            'ETag': part['ETag']
+        })
+        part_number += 1
+
+# Complete the upload
+s3.complete_multipart_upload(
+    Bucket='my-bucket',
+    Key='manual-upload.bin',
+    UploadId=upload_id,
+    MultipartUpload={'Parts': parts}
+)
+
+# Abort a multipart upload if needed
+# s3.abort_multipart_upload(Bucket='my-bucket', Key='manual-upload.bin', UploadId=upload_id)
+```
+
+### Go (AWS SDK)
+
+```go
+package main
+
+import (
+    "os"
+    "github.com/aws/aws-sdk-go/aws"
+    "github.com/aws/aws-sdk-go/aws/credentials"
+    "github.com/aws/aws-sdk-go/aws/session"
+    "github.com/aws/aws-sdk-go/service/s3/s3manager"
+)
+
+func main() {
+    sess := session.Must(session.NewSession(&aws.Config{
+        Endpoint:         aws.String("http://localhost:8000"),
+        Region:           aws.String("us-east-1"),
+        Credentials:      credentials.NewStaticCredentials("dummy", "dummy", ""),
+        S3ForcePathStyle: aws.Bool(true),
+    }))
+
+    uploader := s3manager.NewUploader(sess)
+
+    file, err := os.Open("large-file.bin")
+    if err != nil {
+        panic(err)
+    }
+    defer file.Close()
+
+    // Automatic multipart upload
+    result, err := uploader.Upload(&s3manager.UploadInput{
+        Bucket: aws.String("my-bucket"),
+        Key:    aws.String("large-file.bin"),
+        Body:   file,
+    })
+    
+    if err != nil {
+        panic(err)
+    }
+    
+    println("Upload successful:", *result.Location)
+}
+```
+
 ## Architecture
 
 S3Dir uses a layered architecture:
@@ -317,7 +448,6 @@ S3Dir uses a layered architecture:
 
 - **Authentication**: Currently implements basic access key validation. Full AWS Signature V4 verification is simplified.
 - **Object Metadata**: Custom metadata is not persisted (filesystem limitations).
-- **Multipart Uploads**: Not yet implemented.
 - **Versioning**: Not supported.
 - **ACLs**: Not supported.
 - **Lifecycle Policies**: Not supported.

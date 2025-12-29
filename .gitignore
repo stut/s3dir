@@ -1,5 +1,5 @@
-# Binaries
-s3dir
+# Binaries (only in root, not cmd/s3dir/)
+/s3dir
 *.exe
 *.dll
 *.so

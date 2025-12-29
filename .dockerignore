@@ -1,36 +1,33 @@
+# Only exclude specific directories and files, don't use wildcards that might exclude source
+
 # Data directories
-data/
-data-auth/
-public/
+data
+data-auth
+public
 
-# Documentation
-*.md
-!go.mod
-!go.sum
+# Git
+.git
+.github
 
-# Git files
-.git/
-.gitignore
-.github/
-
-# Docker files
+# Docker files (not needed in build)
 Dockerfile
 docker-compose.yml
-.dockerignore
 
 # Build artifacts
 s3dir
-*.exe
 coverage.out
-*.prof
 
-# Development files
-.vscode/
-.idea/
+# Documentation (not needed for build)
+README.md
+DEVELOPMENT.md
+SUMMARY.md
+DOCKERHUB_SETUP.md
+DOCKERHUB_QUICKSTART.md
+PROJECT_COMPLETE.md
+LICENSE
 
-# Examples (not needed for build, only for documentation)
-examples/
+# Examples (not needed for build)
+examples
 
-# Test files (tests run in CI, not needed in container)
-test/
-*_test.go
+# Keep test files but they won't be run in Docker
+# test directory is kept for potential future use

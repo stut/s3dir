@@ -5,6 +5,8 @@ run:
   tests: false
   skip-dirs:
     - examples
+  skip-files:
+    - "examples/.*\\.go$"
 
 linters:
   enable:
@@ -24,6 +26,13 @@ issues:
     - text: "Error return value.*defer.*Remove"
       linters:
         - errcheck
+    # Exclude all issues from examples directory
+    - path: examples/.*\.go
+      linters:
+        - staticcheck
+        - govet
+        - unused
+        - ineffassign
 
   max-issues-per-linter: 0
   max-same-issues: 0

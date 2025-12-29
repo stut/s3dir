@@ -1,7 +1,7 @@
 package main
 
 /*
-Example Go client for S3Dir using AWS SDK for Go.
+Example Go client for S3Dir using AWS SDK for Go v2.
 
 Usage:
     go run examples/go-client.go
@@ -9,31 +9,39 @@ Usage:
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func main() {
-	// Create S3 client
-	sess := session.Must(session.NewSession(&aws.Config{
-		Endpoint:         aws.String("http://localhost:8000"),
-		Region:           aws.String("us-east-1"),
-		Credentials:      credentials.NewStaticCredentials("dummy", "dummy", ""),
-		S3ForcePathStyle: aws.Bool(true),
-	}))
+	ctx := context.Background()
 
-	svc := s3.New(sess)
+	// Create S3 client
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("dummy", "dummy", "")),
+	)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String("http://localhost:8000")
+		o.UsePathStyle = true
+	})
+
 	bucketName := "example-bucket"
 
 	// Create bucket
 	fmt.Println("Creating bucket...")
-	_, err := svc.CreateBucket(&s3.CreateBucketInput{
+	_, err = svc.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
@@ -44,7 +52,7 @@ func main() {
 
 	// Upload object
 	fmt.Println("\nUploading object...")
-	_, err = svc.PutObject(&s3.PutObjectInput{
+	_, err = svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String("hello.txt"),
 		Body:   bytes.NewReader([]byte("Hello from Go!")),
@@ -56,7 +64,7 @@ func main() {
 
 	// List buckets
 	fmt.Println("\nListing buckets...")
-	bucketsResult, err := svc.ListBuckets(nil)
+	bucketsResult, err := svc.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		log.Fatalf("List buckets failed: %v", err)
 	}
@@ -66,19 +74,19 @@ func main() {
 
 	// List objects
 	fmt.Println("\nListing objects...")
-	objectsResult, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+	objectsResult, err := svc.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
 		log.Fatalf("List objects failed: %v", err)
 	}
 	for _, obj := range objectsResult.Contents {
-		fmt.Printf("  - %s (%d bytes)\n", *obj.Key, *obj.Size)
+		fmt.Printf("  - %s (%d bytes)\n", *obj.Key, obj.Size)
 	}
 
 	// Download object
 	fmt.Println("\nDownloading object...")
-	getResult, err := svc.GetObject(&s3.GetObjectInput{
+	getResult, err := svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String("hello.txt"),
 	})
@@ -95,7 +103,7 @@ func main() {
 
 	// Head object
 	fmt.Println("\nGetting object metadata...")
-	headResult, err := svc.HeadObject(&s3.HeadObjectInput{
+	headResult, err := svc.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String("hello.txt"),
 	})
@@ -114,7 +122,7 @@ func main() {
 		"other.txt":     "Other content",
 	}
 	for key, content := range objects {
-		_, err := svc.PutObject(&s3.PutObjectInput{
+		_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(key),
 			Body:   bytes.NewReader([]byte(content)),
@@ -127,7 +135,7 @@ func main() {
 
 	// List with prefix
 	fmt.Println("\nListing objects with prefix 'dir/'...")
-	prefixResult, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+	prefixResult, err := svc.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucketName),
 		Prefix: aws.String("dir/"),
 	})
@@ -140,7 +148,7 @@ func main() {
 
 	// List with delimiter
 	fmt.Println("\nListing with delimiter '/'...")
-	delimiterResult, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+	delimiterResult, err := svc.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(bucketName),
 		Delimiter: aws.String("/"),
 	})
@@ -160,7 +168,7 @@ func main() {
 	fmt.Println("\nCleaning up...")
 
 	// Delete all objects
-	listResult, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+	listResult, err := svc.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
@@ -168,7 +176,7 @@ func main() {
 	}
 
 	for _, obj := range listResult.Contents {
-		_, err := svc.DeleteObject(&s3.DeleteObjectInput{
+		_, err := svc.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    obj.Key,
 		})
@@ -180,7 +188,7 @@ func main() {
 	}
 
 	// Delete bucket
-	_, err = svc.DeleteBucket(&s3.DeleteBucketInput{
+	_, err = svc.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {

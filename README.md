@@ -518,6 +518,21 @@ S3DIR_ENABLE_AUTH=false ./s3dir
 aws --endpoint-url=http://localhost:8000 s3 ls s3://bucket/prefix/
 ```
 
+**Problem**: High memory usage when uploading very large files (>1GB)
+
+```bash
+# Solution: Use multipart uploads instead of single PUT requests
+# AWS CLI automatically uses multipart for files >8MB:
+aws --endpoint-url=http://localhost:8000 s3 cp large-file.bin s3://bucket/
+
+# For other clients, configure multipart threshold:
+# boto3: Set TransferConfig(multipart_threshold=...)
+# AWS SDK v2: Use transfer manager with appropriate part size
+
+# Why: Single PUT requests may buffer data in memory due to HTTP/TCP overhead.
+# Multipart uploads use streaming for each part, keeping memory usage constant.
+```
+
 ## Contributing
 
 Contributions are welcome! Please see [DEVELOPMENT.md](DEVELOPMENT.md) for developer documentation and guidelines.

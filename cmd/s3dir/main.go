@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/stut/s3dir/internal/config"
 	"github.com/stut/s3dir/pkg/auth"
@@ -52,10 +53,16 @@ func main() {
 	// Add CORS headers for browser compatibility
 	httpHandler = corsMiddleware(httpHandler)
 
-	// Create server
+	// Create server with optimized settings for large file uploads
+	// Note: For very large files (>1GB), clients should use multipart uploads
+	// to minimize memory usage. Single PUT requests may buffer data in memory.
 	server := &http.Server{
-		Addr:    cfg.Address(),
-		Handler: httpHandler,
+		Addr:              cfg.Address(),
+		Handler:           httpHandler,
+		MaxHeaderBytes:    1 << 20, // 1 MB max header size
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      0, // No write timeout for large uploads
+		ReadTimeout:       0, // No read timeout for large uploads
 	}
 
 	// Setup graceful shutdown

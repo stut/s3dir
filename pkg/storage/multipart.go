@@ -112,11 +112,12 @@ func (m *MultipartManager) UploadPart(uploadID string, partNumber int, reader io
 	}
 	defer partFile.Close()
 
-	// Calculate MD5 while writing
+	// Calculate MD5 while writing using a fixed-size buffer to limit memory usage
 	hash := md5.New()
 	writer := io.MultiWriter(partFile, hash)
 
-	written, err := io.Copy(writer, reader)
+	buffer := make([]byte, 32*1024) // 32KB buffer for streaming
+	written, err := io.CopyBuffer(writer, reader, buffer)
 	if err != nil {
 		os.Remove(partPath)
 		return "", fmt.Errorf("failed to write part: %w", err)
@@ -190,8 +191,11 @@ func (m *MultipartManager) CompleteUpload(uploadID string, parts []CompletePart)
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	// Assemble parts
+	// Assemble parts while calculating hash in a single pass
 	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+	buffer := make([]byte, 32*1024) // 32KB buffer for streaming
+
 	for _, cp := range parts {
 		upload.mu.RLock()
 		part := upload.Parts[cp.PartNumber]
@@ -203,15 +207,12 @@ func (m *MultipartManager) CompleteUpload(uploadID string, parts []CompletePart)
 			return "", fmt.Errorf("failed to open part %d: %w", cp.PartNumber, err)
 		}
 
-		if _, err := io.Copy(tmpFile, partFile); err != nil {
+		if _, err := io.CopyBuffer(writer, partFile, buffer); err != nil {
 			partFile.Close()
 			tmpFile.Close()
 			return "", fmt.Errorf("failed to copy part %d: %w", cp.PartNumber, err)
 		}
 
-		// Read again for hash
-		partFile.Seek(0, 0)
-		io.Copy(hash, partFile)
 		partFile.Close()
 	}
 

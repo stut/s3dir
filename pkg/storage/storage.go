@@ -58,8 +58,10 @@ func (s *Storage) PutObject(bucket, key string, reader io.Reader, size int64) er
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	// Copy data to temporary file
-	_, err = io.Copy(tmpFile, reader)
+	// Copy data to temporary file using a fixed-size buffer to limit memory usage
+	// This ensures we stream data in 32KB chunks rather than allocating large buffers
+	buffer := make([]byte, 32*1024) // 32KB buffer
+	_, err = io.CopyBuffer(tmpFile, reader, buffer)
 	closeErr := tmpFile.Close()
 	if err != nil {
 		return fmt.Errorf("failed to write object: %w", err)

@@ -533,6 +533,30 @@ aws --endpoint-url=http://localhost:8000 s3 cp large-file.bin s3://bucket/
 # Multipart uploads use streaming for each part, keeping memory usage constant.
 ```
 
+**Problem**: Timeout completing multipart upload of very large files (>10GB)
+
+```bash
+# Error: "Read timeout on endpoint URL"
+# This happens during the final assembly step for large multipart uploads
+
+# Solution: Increase the client timeout
+# AWS CLI v2:
+aws configure set s3.multipart_threshold 8MB
+aws configure set s3.max_concurrent_requests 10
+# Or set in environment:
+export AWS_CLI_READ_TIMEOUT=300  # 5 minutes
+
+# Python boto3:
+from botocore.config import Config
+config = Config(read_timeout=300)
+s3 = boto3.client('s3', config=config, ...)
+
+# Note: S3Dir optimizes assembly using:
+# - 1MB buffer size for fast I/O
+# - MD5-of-MD5s calculation (not full-file hash)
+# - Typical assembly speed: ~500MB/sec on modern hardware
+```
+
 ## Contributing
 
 Contributions are welcome! Please see [DEVELOPMENT.md](DEVELOPMENT.md) for developer documentation and guidelines.

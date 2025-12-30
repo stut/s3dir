@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -191,23 +192,32 @@ func (m *MultipartManager) CompleteUpload(uploadID string, parts []CompletePart)
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	// Assemble parts while calculating hash in a single pass
-	hash := md5.New()
-	writer := io.MultiWriter(tmpFile, hash)
-	buffer := make([]byte, 32*1024) // 32KB buffer for streaming
+	// Assemble parts - use large buffer for faster assembly of large files
+	// Use 1MB buffer instead of 32KB to speed up assembly of multi-GB files
+	buffer := make([]byte, 1024*1024)
 
+	// Calculate ETag as MD5 of concatenated part ETags (S3 multipart ETag format)
+	// This is much faster than hashing the entire assembled file
+	hash := md5.New()
 	for _, cp := range parts {
 		upload.mu.RLock()
 		part := upload.Parts[cp.PartNumber]
 		upload.mu.RUnlock()
 
+		// Write part's MD5 to hash (for multipart ETag calculation)
+		// Extract hex MD5 from ETag (remove quotes)
+		partMD5 := strings.Trim(part.ETag, "\"")
+		partMD5Bytes, _ := hex.DecodeString(partMD5)
+		hash.Write(partMD5Bytes)
+
+		// Copy part data to final file
 		partFile, err := os.Open(part.Path)
 		if err != nil {
 			tmpFile.Close()
 			return "", fmt.Errorf("failed to open part %d: %w", cp.PartNumber, err)
 		}
 
-		if _, err := io.CopyBuffer(writer, partFile, buffer); err != nil {
+		if _, err := io.CopyBuffer(tmpFile, partFile, buffer); err != nil {
 			partFile.Close()
 			tmpFile.Close()
 			return "", fmt.Errorf("failed to copy part %d: %w", cp.PartNumber, err)
@@ -223,7 +233,7 @@ func (m *MultipartManager) CompleteUpload(uploadID string, parts []CompletePart)
 		return "", fmt.Errorf("failed to move object: %w", err)
 	}
 
-	// Generate ETag
+	// Generate ETag in S3 multipart format: MD5-of-MD5s + part count
 	etag := fmt.Sprintf("\"%s-%d\"", hex.EncodeToString(hash.Sum(nil)), len(parts))
 
 	// Cleanup - remove from uploads map and delete parts directory

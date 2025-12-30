@@ -105,6 +105,12 @@ func (m *MultipartManager) UploadPart(uploadID string, partNumber int, reader io
 		return "", fmt.Errorf("upload not found")
 	}
 
+	// Ensure parts directory exists (defensive, in case of race conditions)
+	partsDir := m.getPartsDir(uploadID)
+	if err := os.MkdirAll(partsDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create parts directory: %w", err)
+	}
+
 	// Create part file
 	partPath := m.getPartPath(uploadID, partNumber)
 	partFile, err := os.Create(partPath)

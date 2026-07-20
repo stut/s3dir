@@ -19,6 +19,8 @@ type MultipartUpload struct {
 	UploadID     string
 	Bucket       string
 	Key          string
+	ContentType  string
+	UserMetadata map[string]string
 	Initiated    time.Time
 	LastActivity time.Time
 	Parts        map[int]*UploadPart
@@ -62,7 +64,7 @@ func NewMultipartManager(baseDir string) *MultipartManager {
 }
 
 // InitiateUpload starts a new multipart upload
-func (m *MultipartManager) InitiateUpload(bucket, key string) (string, error) {
+func (m *MultipartManager) InitiateUpload(bucket, key, contentType string, userMetadata map[string]string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -74,6 +76,8 @@ func (m *MultipartManager) InitiateUpload(bucket, key string) (string, error) {
 		UploadID:     uploadID,
 		Bucket:       bucket,
 		Key:          key,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
 		Initiated:    now,
 		LastActivity: now,
 		Parts:        make(map[int]*UploadPart),
@@ -242,6 +246,16 @@ func (m *MultipartManager) CompleteUpload(uploadID string, parts []CompletePart)
 	// Generate ETag in S3 multipart format: MD5-of-MD5s + part count
 	etag := fmt.Sprintf("\"%s-%d\"", hex.EncodeToString(hash.Sum(nil)), len(parts))
 
+	// Persist the object's metadata sidecar
+	meta := &objectMetadata{
+		ETag:         strings.Trim(etag, "\""),
+		ContentType:  upload.ContentType,
+		UserMetadata: upload.UserMetadata,
+	}
+	if err := writeObjectMetadataFile(m.baseDir, upload.Bucket, upload.Key, meta); err != nil {
+		return "", fmt.Errorf("failed to write metadata: %w", err)
+	}
+
 	// Cleanup - remove from uploads map and delete parts directory
 	m.mu.Lock()
 	delete(m.uploads, uploadID)
@@ -351,6 +365,8 @@ func (m *MultipartManager) saveUploadMetadata(upload *MultipartUpload) error {
 		UploadID     string
 		Bucket       string
 		Key          string
+		ContentType  string
+		UserMetadata map[string]string
 		Initiated    time.Time
 		LastActivity time.Time
 		Parts        map[int]*UploadPart
@@ -358,6 +374,8 @@ func (m *MultipartManager) saveUploadMetadata(upload *MultipartUpload) error {
 		UploadID:     upload.UploadID,
 		Bucket:       upload.Bucket,
 		Key:          upload.Key,
+		ContentType:  upload.ContentType,
+		UserMetadata: upload.UserMetadata,
 		Initiated:    upload.Initiated,
 		LastActivity: upload.LastActivity,
 		Parts:        partsCopy,

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,6 +19,7 @@ type ObjectInfo struct {
 	LastModified time.Time
 	ETag         string
 	ContentType  string
+	UserMetadata map[string]string
 }
 
 // Storage provides filesystem-based storage for S3 objects
@@ -45,39 +47,58 @@ func New(baseDir string) (*Storage, error) {
 
 // PutObject stores an object
 func (s *Storage) PutObject(bucket, key string, reader io.Reader, size int64) error {
+	_, err := s.PutObjectWithMetadata(bucket, key, reader, size, "", nil)
+	return err
+}
+
+// PutObjectWithMetadata stores an object along with its content type and user
+// metadata, returning the quoted MD5 ETag of the content
+func (s *Storage) PutObjectWithMetadata(bucket, key string, reader io.Reader, size int64, contentType string, userMetadata map[string]string) (string, error) {
 	objectPath := s.objectPath(bucket, key)
 
 	// Create parent directories
 	if err := os.MkdirAll(filepath.Dir(objectPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+		return "", fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	// Create temporary file
 	tmpFile, err := os.CreateTemp(filepath.Dir(objectPath), ".s3dir-tmp-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %w", err)
+		return "", fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	// Copy data to temporary file using a fixed-size buffer to limit memory usage
+	// Copy data to temporary file using a fixed-size buffer to limit memory usage,
+	// calculating the content MD5 in the same pass
 	// This ensures we stream data in 32KB chunks rather than allocating large buffers
+	hash := md5.New()
 	buffer := make([]byte, 32*1024) // 32KB buffer
-	_, err = io.CopyBuffer(tmpFile, reader, buffer)
+	_, err = io.CopyBuffer(io.MultiWriter(tmpFile, hash), reader, buffer)
 	closeErr := tmpFile.Close()
 	if err != nil {
-		return fmt.Errorf("failed to write object: %w", err)
+		return "", fmt.Errorf("failed to write object: %w", err)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("failed to close temporary file: %w", closeErr)
+		return "", fmt.Errorf("failed to close temporary file: %w", closeErr)
 	}
 
 	// Move temporary file to final location
 	if err := os.Rename(tmpPath, objectPath); err != nil {
-		return fmt.Errorf("failed to move object: %w", err)
+		return "", fmt.Errorf("failed to move object: %w", err)
 	}
 
-	return nil
+	etag := hex.EncodeToString(hash.Sum(nil))
+	meta := &objectMetadata{
+		ETag:         etag,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	}
+	if err := writeObjectMetadataFile(s.baseDir, bucket, key, meta); err != nil {
+		return "", fmt.Errorf("failed to write metadata: %w", err)
+	}
+
+	return fmt.Sprintf("\"%s\"", etag), nil
 }
 
 // GetObject retrieves an object
@@ -101,20 +122,91 @@ func (s *Storage) GetObject(bucket, key string) (io.ReadCloser, *ObjectInfo, err
 		return nil, nil, fmt.Errorf("failed to open object: %w", err)
 	}
 
+	return file, s.objectInfo(bucket, key, stat), nil
+}
+
+// GetObjectRange retrieves a byte range of an object. start is the first byte
+// offset and length the number of bytes to read
+func (s *Storage) GetObjectRange(bucket, key string, start, length int64) (io.ReadCloser, *ObjectInfo, error) {
+	objectPath := s.objectPath(bucket, key)
+
+	stat, err := os.Stat(objectPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, fmt.Errorf("object not found")
+		}
+		return nil, nil, fmt.Errorf("failed to stat object: %w", err)
+	}
+
+	if stat.IsDir() {
+		return nil, nil, fmt.Errorf("cannot get directory as object")
+	}
+
+	file, err := os.Open(objectPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open object: %w", err)
+	}
+
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		file.Close()
+		return nil, nil, fmt.Errorf("failed to seek object: %w", err)
+	}
+
+	reader := &rangeReadCloser{
+		Reader: io.LimitReader(file, length),
+		file:   file,
+	}
+
+	return reader, s.objectInfo(bucket, key, stat), nil
+}
+
+// rangeReadCloser wraps a limited reader over an open file so the file is
+// closed when the caller finishes reading the range
+type rangeReadCloser struct {
+	io.Reader
+	file *os.File
+}
+
+func (r *rangeReadCloser) Close() error {
+	return r.file.Close()
+}
+
+// objectInfo builds an ObjectInfo from a file stat plus the metadata sidecar,
+// falling back to a modification-time ETag for objects without a sidecar
+func (s *Storage) objectInfo(bucket, key string, stat os.FileInfo) *ObjectInfo {
 	info := &ObjectInfo{
 		Key:          key,
 		Size:         stat.Size(),
 		LastModified: stat.ModTime(),
-		ETag:         fmt.Sprintf("\"%x\"", stat.ModTime().Unix()),
 	}
 
-	return file, info, nil
+	if meta := readObjectMetadataFile(s.baseDir, bucket, key); meta != nil {
+		if meta.ETag != "" {
+			info.ETag = fmt.Sprintf("\"%s\"", meta.ETag)
+		}
+		info.ContentType = meta.ContentType
+		info.UserMetadata = meta.UserMetadata
+	}
+
+	if info.ETag == "" {
+		info.ETag = fmt.Sprintf("\"%x\"", stat.ModTime().Unix())
+	}
+
+	return info
 }
 
 // CopyObject copies an object server-side, streaming the data through a
-// fixed-size buffer while calculating the MD5 of the content
+// fixed-size buffer while calculating the MD5 of the content. The source
+// object's content type and user metadata are carried over
 func (s *Storage) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*ObjectInfo, error) {
-	reader, _, err := s.GetObject(srcBucket, srcKey)
+	return s.CopyObjectWithMetadata(srcBucket, srcKey, dstBucket, dstKey, false, "", nil)
+}
+
+// CopyObjectWithMetadata copies an object server-side. When replaceMetadata is
+// true the given content type and user metadata are stored on the destination
+// instead of the source object's metadata
+func (s *Storage) CopyObjectWithMetadata(srcBucket, srcKey, dstBucket, dstKey string, replaceMetadata bool, contentType string, userMetadata map[string]string) (*ObjectInfo, error) {
+	reader, srcInfo, err := s.GetObject(srcBucket, srcKey)
 	if err != nil {
 		return nil, err
 	}
@@ -157,11 +249,28 @@ func (s *Storage) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Obje
 		return nil, fmt.Errorf("failed to stat object: %w", err)
 	}
 
+	etag := hex.EncodeToString(hash.Sum(nil))
+	meta := &objectMetadata{
+		ETag:         etag,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	}
+	if !replaceMetadata {
+		// Carry over the source object's metadata (S3 COPY directive)
+		meta.ContentType = srcInfo.ContentType
+		meta.UserMetadata = srcInfo.UserMetadata
+	}
+	if err := writeObjectMetadataFile(s.baseDir, dstBucket, dstKey, meta); err != nil {
+		return nil, fmt.Errorf("failed to write metadata: %w", err)
+	}
+
 	return &ObjectInfo{
 		Key:          dstKey,
 		Size:         written,
 		LastModified: stat.ModTime(),
-		ETag:         fmt.Sprintf("\"%s\"", hex.EncodeToString(hash.Sum(nil))),
+		ETag:         fmt.Sprintf("\"%s\"", etag),
+		ContentType:  meta.ContentType,
+		UserMetadata: meta.UserMetadata,
 	}, nil
 }
 
@@ -174,8 +283,12 @@ func (s *Storage) DeleteObject(bucket, key string) error {
 		return fmt.Errorf("failed to delete object: %w", err)
 	}
 
+	removeObjectMetadataFile(s.baseDir, bucket, key)
+
 	// Clean up empty parent directories
 	s.cleanupEmptyDirs(filepath.Dir(objectPath), s.bucketPath(bucket))
+	metadataBucketDir := filepath.Join(s.baseDir, metadataDirName, bucket)
+	s.cleanupEmptyDirs(filepath.Dir(objectMetadataPath(s.baseDir, bucket, key)), metadataBucketDir)
 
 	return nil
 }
@@ -196,28 +309,36 @@ func (s *Storage) HeadObject(bucket, key string) (*ObjectInfo, error) {
 		return nil, fmt.Errorf("cannot head directory as object")
 	}
 
-	info := &ObjectInfo{
-		Key:          key,
-		Size:         stat.Size(),
-		LastModified: stat.ModTime(),
-		ETag:         fmt.Sprintf("\"%x\"", stat.ModTime().Unix()),
-	}
-
-	return info, nil
+	return s.objectInfo(bucket, key, stat), nil
 }
 
 // ListObjects lists objects in a bucket with optional prefix and delimiter
 func (s *Storage) ListObjects(bucket, prefix, delimiter string, maxKeys int) ([]ObjectInfo, []string, error) {
+	objects, commonPrefixes, _, _, err := s.ListObjectsPage(bucket, prefix, delimiter, "", maxKeys)
+	return objects, commonPrefixes, err
+}
+
+// listEntry is a single result of a listing: either an object or a rolled-up
+// common prefix
+type listEntry struct {
+	name     string
+	isPrefix bool
+	stat     os.FileInfo
+}
+
+// ListObjectsPage lists objects in a bucket in lexicographic key order,
+// returning entries strictly after marker, up to maxKeys objects and common
+// prefixes combined (maxKeys <= 0 means unlimited). It reports whether the
+// listing was truncated and the marker to resume from
+func (s *Storage) ListObjectsPage(bucket, prefix, delimiter, marker string, maxKeys int) ([]ObjectInfo, []string, bool, string, error) {
 	bucketPath := s.bucketPath(bucket)
 
 	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
-		return nil, nil, fmt.Errorf("bucket not found")
+		return nil, nil, false, "", fmt.Errorf("bucket not found")
 	}
 
-	var objects []ObjectInfo
-	var commonPrefixes []string
-	prefixMap := make(map[string]bool)
-
+	// Collect all keys matching the prefix
+	var keys []listEntry
 	err := filepath.Walk(bucketPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip files we can't access
@@ -236,56 +357,79 @@ func (s *Storage) ListObjects(bucket, prefix, delimiter string, maxKeys int) ([]
 		// Convert to S3-style key (forward slashes)
 		key := filepath.ToSlash(relPath)
 
-		// Apply prefix filter
-		if prefix != "" && !strings.HasPrefix(key, prefix) {
-			if !strings.HasPrefix(prefix, key+"/") {
+		if info.IsDir() {
+			// Skip subtrees that cannot contain keys with the prefix
+			if prefix != "" && !strings.HasPrefix(key+"/", prefix) && !strings.HasPrefix(prefix, key+"/") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// Handle delimiter
-		if delimiter != "" {
-			remainder := strings.TrimPrefix(key, prefix)
-			if idx := strings.Index(remainder, delimiter); idx != -1 {
-				commonPrefix := prefix + remainder[:idx+len(delimiter)]
-				if !prefixMap[commonPrefix] {
-					prefixMap[commonPrefix] = true
-					commonPrefixes = append(commonPrefixes, commonPrefix)
-				}
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-		}
-
-		// Skip directories
-		if info.IsDir() {
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
 		}
 
-		// Add object
-		objects = append(objects, ObjectInfo{
-			Key:          key,
-			Size:         info.Size(),
-			LastModified: info.ModTime(),
-			ETag:         fmt.Sprintf("\"%x\"", info.ModTime().Unix()),
-		})
-
-		// Check max keys limit
-		if maxKeys > 0 && len(objects) >= maxKeys {
-			return filepath.SkipAll
-		}
-
+		keys = append(keys, listEntry{name: key, stat: info})
 		return nil
 	})
-
-	if err != nil && err != filepath.SkipAll {
-		return nil, nil, fmt.Errorf("failed to list objects: %w", err)
+	if err != nil {
+		return nil, nil, false, "", fmt.Errorf("failed to list objects: %w", err)
 	}
 
-	return objects, commonPrefixes, nil
+	// S3 listings are in lexicographic key order; filesystem walk order is not
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].name < keys[j].name
+	})
+
+	// Roll up keys containing the delimiter into common prefixes. Keys sharing
+	// a common prefix are contiguous in sorted order, so deduplicating against
+	// the previous entry is sufficient
+	var entries []listEntry
+	for _, k := range keys {
+		if delimiter != "" {
+			remainder := strings.TrimPrefix(k.name, prefix)
+			if idx := strings.Index(remainder, delimiter); idx != -1 {
+				commonPrefix := prefix + remainder[:idx+len(delimiter)]
+				if len(entries) > 0 && entries[len(entries)-1].isPrefix && entries[len(entries)-1].name == commonPrefix {
+					continue
+				}
+				entries = append(entries, listEntry{name: commonPrefix, isPrefix: true})
+				continue
+			}
+		}
+		entries = append(entries, k)
+	}
+
+	// Resume strictly after the marker
+	if marker != "" {
+		start := sort.Search(len(entries), func(i int) bool {
+			return entries[i].name > marker
+		})
+		entries = entries[start:]
+	}
+
+	truncated := maxKeys > 0 && len(entries) > maxKeys
+	if truncated {
+		entries = entries[:maxKeys]
+	}
+
+	nextMarker := ""
+	if truncated {
+		nextMarker = entries[len(entries)-1].name
+	}
+
+	// Build results, reading metadata sidecars only for the returned page
+	var objects []ObjectInfo
+	var commonPrefixes []string
+	for _, e := range entries {
+		if e.isPrefix {
+			commonPrefixes = append(commonPrefixes, e.name)
+		} else {
+			objects = append(objects, *s.objectInfo(bucket, e.name, e.stat))
+		}
+	}
+
+	return objects, commonPrefixes, truncated, nextMarker, nil
 }
 
 // CreateBucket creates a new bucket (directory)
@@ -323,6 +467,9 @@ func (s *Storage) DeleteBucket(bucket string) error {
 		return fmt.Errorf("failed to delete bucket: %w", err)
 	}
 
+	// Remove any leftover metadata sidecars for the bucket
+	os.RemoveAll(filepath.Join(s.baseDir, metadataDirName, bucket))
+
 	return nil
 }
 
@@ -354,7 +501,8 @@ func (s *Storage) ListBuckets() ([]string, error) {
 
 	var buckets []string
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// Skip internal directories (.multipart, .metadata)
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
 			buckets = append(buckets, entry.Name())
 		}
 	}
@@ -388,11 +536,17 @@ func (s *Storage) cleanupEmptyDirs(path, stopPath string) {
 
 // InitiateMultipartUpload starts a new multipart upload
 func (s *Storage) InitiateMultipartUpload(bucket, key string) (string, error) {
+	return s.InitiateMultipartUploadWithMetadata(bucket, key, "", nil)
+}
+
+// InitiateMultipartUploadWithMetadata starts a new multipart upload, recording
+// the content type and user metadata to store on the completed object
+func (s *Storage) InitiateMultipartUploadWithMetadata(bucket, key, contentType string, userMetadata map[string]string) (string, error) {
 	// Verify bucket exists
 	if err := s.HeadBucket(bucket); err != nil {
 		return "", err
 	}
-	return s.multipart.InitiateUpload(bucket, key)
+	return s.multipart.InitiateUpload(bucket, key, contentType, userMetadata)
 }
 
 // UploadPart uploads a part of a multipart upload

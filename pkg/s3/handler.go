@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +32,7 @@ func NewHandler(storage *storage.Storage, readOnly, verbose bool) *Handler {
 // ServeHTTP handles HTTP requests and routes them to appropriate handlers
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.verbose {
-		fmt.Printf("%s %s\n", r.Method, r.URL.Path)
+		fmt.Printf("%s %s\n", r.Method, r.URL.RequestURI())
 	}
 
 	// Parse bucket and key from path
@@ -69,6 +70,16 @@ func (h *Handler) handleBucketOperation(w http.ResponseWriter, r *http.Request, 
 	// Check for multipart uploads listing
 	if r.Method == http.MethodGet && r.URL.Query().Has("uploads") {
 		h.listMultipartUploads(w, r, bucket)
+		return
+	}
+
+	// Check for batch delete
+	if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		h.deleteObjects(w, r, bucket)
 		return
 	}
 
@@ -110,9 +121,13 @@ func (h *Handler) handleObjectOperation(w http.ResponseWriter, r *http.Request, 
 			// List parts
 			h.listParts(w, r, bucket, key, uploadID)
 		case http.MethodPut:
-			// Upload part
+			// Upload part (from the request body or copied from an existing object)
 			if partNumber := query.Get("partNumber"); partNumber != "" {
-				h.uploadPart(w, r, bucket, key, uploadID, partNumber)
+				if r.Header.Get("x-amz-copy-source") != "" {
+					h.uploadPartCopy(w, r, bucket, key, uploadID, partNumber)
+				} else {
+					h.uploadPart(w, r, bucket, key, uploadID, partNumber)
+				}
 			} else {
 				writeError(w, "InvalidRequest", "partNumber is required", http.StatusBadRequest)
 			}
@@ -153,6 +168,10 @@ func (h *Handler) handleObjectOperation(w http.ResponseWriter, r *http.Request, 
 			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
 			return
 		}
+		if r.Header.Get("x-amz-copy-source") != "" {
+			h.copyObject(w, r, bucket, key)
+			return
+		}
 		h.putObject(w, r, bucket, key)
 	case http.MethodDelete:
 		if h.readOnly {
@@ -177,7 +196,7 @@ func (h *Handler) listBuckets(w http.ResponseWriter, r *http.Request) {
 	for _, name := range buckets {
 		bucketList = append(bucketList, Bucket{
 			Name:         name,
-			CreationDate: time.Now().Format(time.RFC3339),
+			CreationDate: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
 
@@ -218,7 +237,7 @@ func (h *Handler) listObjects(w http.ResponseWriter, r *http.Request, bucket str
 	for _, obj := range objects {
 		contents = append(contents, Object{
 			Key:          obj.Key,
-			LastModified: obj.LastModified.Format(time.RFC3339),
+			LastModified: obj.LastModified.UTC().Format(time.RFC3339),
 			ETag:         obj.ETag,
 			Size:         obj.Size,
 			StorageClass: "STANDARD",
@@ -413,6 +432,153 @@ func writeError(w http.ResponseWriter, code, message string, statusCode int) {
 	writeXML(w, errorResponse, statusCode)
 }
 
+// parseCopySource parses an x-amz-copy-source header value into bucket and key.
+// The value is "/{bucket}/{key}" or "{bucket}/{key}" and may be URL-encoded
+func parseCopySource(source string) (bucket, key string, err error) {
+	// Strip any query string (e.g. ?versionId=...)
+	if idx := strings.Index(source, "?"); idx != -1 {
+		source = source[:idx]
+	}
+
+	decoded, err := url.PathUnescape(source)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid copy source encoding")
+	}
+
+	decoded = strings.TrimPrefix(decoded, "/")
+	parts := strings.SplitN(decoded, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("copy source must be of the form /bucket/key")
+	}
+
+	return parts[0], parts[1], nil
+}
+
+// parseCopySourceRange parses an x-amz-copy-source-range header value of the
+// form "bytes=start-end" (inclusive)
+func parseCopySourceRange(value string) (start, end int64, err error) {
+	spec, ok := strings.CutPrefix(value, "bytes=")
+	if !ok {
+		return 0, 0, fmt.Errorf("range must be of the form bytes=start-end")
+	}
+
+	startStr, endStr, ok := strings.Cut(spec, "-")
+	if !ok {
+		return 0, 0, fmt.Errorf("range must be of the form bytes=start-end")
+	}
+
+	start, err = strconv.ParseInt(startStr, 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, fmt.Errorf("invalid range start")
+	}
+
+	end, err = strconv.ParseInt(endStr, 10, 64)
+	if err != nil || end < start {
+		return 0, 0, fmt.Errorf("invalid range end")
+	}
+
+	return start, end, nil
+}
+
+// copyObject copies an object server-side
+func (h *Handler) copyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	if err != nil {
+		writeError(w, "InvalidArgument", err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	info, err := h.storage.CopyObject(srcBucket, srcKey, bucket, key)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchKey", "The specified key does not exist", http.StatusNotFound)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	response := CopyObjectResult{
+		LastModified: info.LastModified.UTC().Format(time.RFC3339),
+		ETag:         info.ETag,
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
+// uploadPartCopy copies data from an existing object into a part of a multipart upload
+func (h *Handler) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket, key, uploadID, partNumberStr string) {
+	partNumber, err := strconv.Atoi(partNumberStr)
+	if err != nil || partNumber < 1 || partNumber > 10000 {
+		writeError(w, "InvalidArgument", "Invalid part number", http.StatusBadRequest)
+		return
+	}
+
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	if err != nil {
+		writeError(w, "InvalidArgument", err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// No range means copy the whole source object
+	rangeStart, rangeEnd := int64(-1), int64(-1)
+	if rangeHeader := r.Header.Get("x-amz-copy-source-range"); rangeHeader != "" {
+		rangeStart, rangeEnd, err = parseCopySourceRange(rangeHeader)
+		if err != nil {
+			writeError(w, "InvalidArgument", err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	etag, err := h.storage.UploadPartCopy(uploadID, partNumber, srcBucket, srcKey, rangeStart, rangeEnd)
+	if err != nil {
+		if strings.Contains(err.Error(), "upload not found") {
+			writeError(w, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchKey", "The specified key does not exist", http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "invalid range") {
+			writeError(w, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	response := CopyPartResult{
+		LastModified: time.Now().UTC().Format(time.RFC3339),
+		ETag:         etag,
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
+// deleteObjects deletes multiple objects in a single request
+func (h *Handler) deleteObjects(w http.ResponseWriter, r *http.Request, bucket string) {
+	var deleteRequest Delete
+	if err := xml.NewDecoder(r.Body).Decode(&deleteRequest); err != nil {
+		writeError(w, "MalformedXML", "Invalid XML", http.StatusBadRequest)
+		return
+	}
+
+	var response DeleteResult
+	for _, obj := range deleteRequest.Objects {
+		// Deleting a nonexistent key counts as success (AWS semantics)
+		if err := h.storage.DeleteObject(bucket, obj.Key); err != nil {
+			response.Errors = append(response.Errors, DeleteError{
+				Key:     obj.Key,
+				Code:    "InternalError",
+				Message: err.Error(),
+			})
+			continue
+		}
+		if !deleteRequest.Quiet {
+			response.Deleted = append(response.Deleted, DeletedObject(obj))
+		}
+	}
+
+	writeXML(w, response, http.StatusOK)
+}
+
 // initiateMultipartUpload initiates a multipart upload
 func (h *Handler) initiateMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	uploadID, err := h.storage.InitiateMultipartUpload(bucket, key)
@@ -528,7 +694,7 @@ func (h *Handler) listParts(w http.ResponseWriter, r *http.Request, bucket, key,
 	for _, p := range parts {
 		partsList = append(partsList, Part{
 			PartNumber:   p.PartNumber,
-			LastModified: p.LastModified.Format(time.RFC3339),
+			LastModified: p.LastModified.UTC().Format(time.RFC3339),
 			ETag:         p.ETag,
 			Size:         p.Size,
 		})
@@ -575,7 +741,7 @@ func (h *Handler) listMultipartUploads(w http.ResponseWriter, r *http.Request, b
 				DisplayName: "s3dir",
 			},
 			StorageClass: "STANDARD",
-			Initiated:    u.Initiated.Format(time.RFC3339),
+			Initiated:    u.Initiated.UTC().Format(time.RFC3339),
 		})
 	}
 

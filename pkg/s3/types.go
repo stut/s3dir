@@ -131,6 +131,51 @@ type ListMultipartUploadsResult struct {
 	Uploads            []Upload `xml:"Upload"`
 }
 
+// CopyObjectResult is the response for CopyObject
+type CopyObjectResult struct {
+	XMLName      xml.Name `xml:"CopyObjectResult"`
+	LastModified string   `xml:"LastModified"`
+	ETag         string   `xml:"ETag"`
+}
+
+// CopyPartResult is the response for UploadPartCopy
+type CopyPartResult struct {
+	XMLName      xml.Name `xml:"CopyPartResult"`
+	LastModified string   `xml:"LastModified"`
+	ETag         string   `xml:"ETag"`
+}
+
+// Delete is the request body for DeleteObjects
+type Delete struct {
+	XMLName xml.Name           `xml:"Delete"`
+	Quiet   bool               `xml:"Quiet"`
+	Objects []ObjectIdentifier `xml:"Object"`
+}
+
+// ObjectIdentifier identifies an object in a DeleteObjects request
+type ObjectIdentifier struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteResult is the response for DeleteObjects
+type DeleteResult struct {
+	XMLName xml.Name        `xml:"DeleteResult"`
+	Deleted []DeletedObject `xml:"Deleted"`
+	Errors  []DeleteError   `xml:"Error"`
+}
+
+// DeletedObject represents a successfully deleted object
+type DeletedObject struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteError represents a failed deletion in a DeleteObjects response
+type DeleteError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
 // Upload represents a multipart upload in progress
 type Upload struct {
 	Key          string    `xml:"Key"`

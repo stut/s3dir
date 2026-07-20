@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -107,6 +109,60 @@ func (s *Storage) GetObject(bucket, key string) (io.ReadCloser, *ObjectInfo, err
 	}
 
 	return file, info, nil
+}
+
+// CopyObject copies an object server-side, streaming the data through a
+// fixed-size buffer while calculating the MD5 of the content
+func (s *Storage) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*ObjectInfo, error) {
+	reader, _, err := s.GetObject(srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	dstPath := s.objectPath(dstBucket, dstKey)
+
+	// Create parent directories
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), ".s3dir-tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	// Copy data while calculating MD5, using a fixed-size buffer to limit memory usage
+	hash := md5.New()
+	buffer := make([]byte, 32*1024) // 32KB buffer
+	written, err := io.CopyBuffer(io.MultiWriter(tmpFile, hash), reader, buffer)
+	closeErr := tmpFile.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to copy object: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close temporary file: %w", closeErr)
+	}
+
+	// Move temporary file to final location
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return nil, fmt.Errorf("failed to move object: %w", err)
+	}
+
+	stat, err := os.Stat(dstPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat object: %w", err)
+	}
+
+	return &ObjectInfo{
+		Key:          dstKey,
+		Size:         written,
+		LastModified: stat.ModTime(),
+		ETag:         fmt.Sprintf("\"%s\"", hex.EncodeToString(hash.Sum(nil))),
+	}, nil
 }
 
 // DeleteObject deletes an object
@@ -341,6 +397,45 @@ func (s *Storage) InitiateMultipartUpload(bucket, key string) (string, error) {
 
 // UploadPart uploads a part of a multipart upload
 func (s *Storage) UploadPart(uploadID string, partNumber int, reader io.Reader, size int64) (string, error) {
+	return s.multipart.UploadPart(uploadID, partNumber, reader, size)
+}
+
+// UploadPartCopy copies data from an existing object into a part of a
+// multipart upload. rangeStart/rangeEnd are inclusive byte offsets; pass
+// rangeStart = -1 to copy the whole source object
+func (s *Storage) UploadPartCopy(uploadID string, partNumber int, srcBucket, srcKey string, rangeStart, rangeEnd int64) (string, error) {
+	srcPath := s.objectPath(srcBucket, srcKey)
+
+	stat, err := os.Stat(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("object not found")
+		}
+		return "", fmt.Errorf("failed to stat object: %w", err)
+	}
+	if stat.IsDir() {
+		return "", fmt.Errorf("object not found")
+	}
+
+	file, err := os.Open(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open object: %w", err)
+	}
+	defer file.Close()
+
+	var reader io.Reader = file
+	size := stat.Size()
+	if rangeStart >= 0 {
+		if rangeStart > rangeEnd || rangeEnd >= stat.Size() {
+			return "", fmt.Errorf("invalid range")
+		}
+		if _, err := file.Seek(rangeStart, io.SeekStart); err != nil {
+			return "", fmt.Errorf("failed to seek object: %w", err)
+		}
+		size = rangeEnd - rangeStart + 1
+		reader = io.LimitReader(file, size)
+	}
+
 	return s.multipart.UploadPart(uploadID, partNumber, reader, size)
 }
 

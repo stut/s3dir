@@ -1,38 +1,17 @@
-version: 2
+version: "2"
 
 run:
   timeout: 5m
   tests: false
-  skip-dirs:
-    - examples
-  skip-files:
-    - "examples/.*\\.go$"
 
 linters:
-  enable:
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
+  default: standard
   disable:
     - errcheck
+  exclusions:
+    paths:
+      - examples
 
 issues:
-  # Exclude defer close errors as they are generally safe to ignore
-  exclude-rules:
-    - text: "Error return value.*defer.*Close"
-      linters:
-        - errcheck
-    - text: "Error return value.*defer.*Remove"
-      linters:
-        - errcheck
-    # Exclude all issues from examples directory
-    - path: examples/.*\.go
-      linters:
-        - staticcheck
-        - govet
-        - unused
-        - ineffassign
-
   max-issues-per-linter: 0
   max-same-issues: 0

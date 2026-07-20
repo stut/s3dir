@@ -29,13 +29,11 @@ A production-ready, S3-compatible directory server implemented in Go with compre
 - ✅ Race condition detection enabled
 - ✅ Edge case and error handling coverage
 
-### Documentation (6 comprehensive guides)
+### Documentation (4 comprehensive guides)
 1. **README.md** - User guide with examples and use cases
 2. **DEVELOPMENT.md** - Developer guide with architecture details
-3. **DOCKERHUB_SETUP.md** - Complete DockerHub integration guide
-4. **DOCKERHUB_QUICKSTART.md** - 5-minute setup reference
-5. **examples/README.md** - Client usage examples
-6. **SUMMARY.md** - Project statistics and overview
+3. **examples/README.md** - Client usage examples
+4. **SUMMARY.md** - Project statistics and overview
 
 ### Client Examples (4 languages)
 1. **Bash** (`bash-client.sh`) - AWS CLI examples
@@ -49,23 +47,17 @@ A production-ready, S3-compatible directory server implemented in Go with compre
 - ✅ Health checks and security (non-root user)
 - ✅ Multi-platform support (amd64, arm64)
 
-### CI/CD (3 GitHub Actions workflows)
+### CI/CD (2 GitHub Actions workflows)
 1. **ci.yml** - Continuous Integration
    - Tests on Ubuntu & macOS
    - Multiple Go versions (1.21, 1.22)
    - Linting with golangci-lint
    - Multi-platform binary builds
    
-2. **docker-publish.yml** - Docker Automation
-   - Automated Docker builds on push
-   - Multi-platform images (amd64, arm64)
-   - Smart tagging (latest, version, sha)
-   - Auto-publish to DockerHub
-   
-3. **release.yml** - Release Management
-   - Automated releases on version tags
+2. **release.yml** - Release Management
+   - Manually-dispatched releases
    - Cross-platform binaries (5 platforms)
-   - Checksums and GitHub releases
+   - Multi-arch images published to GHCR
 
 ### Build Automation
 - ✅ Makefile with 15+ targets
@@ -126,34 +118,12 @@ aws --endpoint-url=http://localhost:8000 s3 ls s3://my-bucket/
 
 ---
 
-## 🔧 DockerHub Integration
-
-### What You Need to Do
-
-**Step 1:** Create DockerHub Access Token
-- Go to https://hub.docker.com/settings/security
-- Create token named "GitHub Actions - s3dir"
-- Copy the token
-
-**Step 2:** Add GitHub Secrets
-- Repository → Settings → Secrets → Actions
-- Add `DOCKERHUB_USERNAME` (your username)
-- Add `DOCKERHUB_TOKEN` (the token from step 1)
-
-**Step 3:** Push to GitHub
-- GitHub Actions will automatically build and push to DockerHub!
-
-**Detailed Guide:** See `DOCKERHUB_SETUP.md` or `DOCKERHUB_QUICKSTART.md`
-
----
-
 ## 📁 Project Structure
 
 ```
 s3dir/
 ├── .github/workflows/       # CI/CD automation
 │   ├── ci.yml              # Continuous integration
-│   ├── docker-publish.yml  # Docker builds
 │   └── release.yml         # GitHub releases
 ├── cmd/s3dir/              # Main application
 │   └── main.go
@@ -166,7 +136,6 @@ s3dir/
 ├── examples/               # Client examples (4 languages)
 ├── README.md               # User documentation
 ├── DEVELOPMENT.md          # Developer guide
-├── DOCKERHUB_SETUP.md      # DockerHub integration guide
 ├── Dockerfile              # Container definition
 ├── docker-compose.yml      # Multi-container setup
 ├── Makefile                # Build automation
@@ -197,7 +166,6 @@ All requirements completed:
   - [x] User-facing README with examples
   - [x] Developer-facing DEVELOPMENT guide
   - [x] API usage examples (4 languages)
-  - [x] DockerHub setup guide
   - [x] Inline code documentation
 
 - [x] **Best Practices**
@@ -266,7 +234,7 @@ All requirements completed:
 - **Fully automated** CI/CD pipeline
 - **Multi-platform** Docker support
 - **Clean codebase** following Go best practices
-- **Ready to use** - just add DockerHub secrets!
+- **Ready to use** - just build and run!
 
 ---
 
@@ -285,11 +253,10 @@ This project demonstrates:
 
 ## 🚢 Next Steps
 
-1. **Set up DockerHub** (see DOCKERHUB_QUICKSTART.md)
-2. **Push to GitHub** to trigger CI/CD
-3. **Create a release** with `git tag v1.0.0`
-4. **Share with users** via DockerHub
-5. **Consider future enhancements**:
+1. **Push to GitHub** to trigger CI/CD
+2. **Create a release** by running the Release workflow
+3. **Share with users** via GHCR
+4. **Consider future enhancements**:
    - Multipart upload support
    - Object metadata persistence
    - Full AWS Signature V4 verification
@@ -332,7 +299,6 @@ This project demonstrates:
 
 - **User Guide**: README.md
 - **Developer Guide**: DEVELOPMENT.md
-- **DockerHub Setup**: DOCKERHUB_SETUP.md or DOCKERHUB_QUICKSTART.md
 - **Examples**: examples/README.md
 - **Issues**: Use GitHub Issues
 
@@ -347,7 +313,7 @@ This is a complete, production-ready S3-compatible server with:
 - Automated CI/CD
 - Multi-platform support
 
-**The project is ready to use immediately** - just build and run, or set up DockerHub automation for seamless deployment!
+**The project is ready to use immediately** - just build and run!
 
 ---
 

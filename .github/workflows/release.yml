@@ -1,103 +1,107 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-
-permissions:
-  contents: write
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump for the next dev cycle'
+        type: choice
+        default: minor
+        options:
+          - minor
+          - major
 
 jobs:
-  create-release:
-    name: Create Release
+  release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Run tests
-        run: go test -v ./...
+        run: go test -race ./...
+
+      - name: Resolve release version
+        id: version
+        run: |
+          DEV_VERSION=$(cat VERSION)
+          PENDING_VERSION="${DEV_VERSION%-dev}"
+          MAJOR=$(echo $PENDING_VERSION | cut -d. -f1)
+          MINOR=$(echo $PENDING_VERSION | cut -d. -f2)
+          if [ "${{ inputs.bump }}" = "major" ]; then
+            RELEASE_VERSION="$((MAJOR + 1)).0.0"
+            NEXT_VERSION="$((MAJOR + 1)).1.0-dev"
+          else
+            RELEASE_VERSION="$MAJOR.$MINOR.0"
+            NEXT_VERSION="$MAJOR.$((MINOR + 1)).0-dev"
+          fi
+          echo "$RELEASE_VERSION" > VERSION
+          echo "release=$RELEASE_VERSION" >> $GITHUB_OUTPUT
+          echo "next=$NEXT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Tag release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: release v${{ steps.version.outputs.release }} [skip ci]"
+          git tag "v${{ steps.version.outputs.release }}"
+          git push
+          git push --tags
+
+      - name: Bump to next dev version
+        run: |
+          echo "${{ steps.version.outputs.next }}" > VERSION
+          git add VERSION
+          git commit -m "chore: bump version to ${{ steps.version.outputs.next }} [skip ci]"
+          git push
 
       - name: Build binaries
         run: |
-          # Build for multiple platforms
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-linux-amd64 ./cmd/s3dir
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o s3dir-linux-arm64 ./cmd/s3dir
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-darwin-amd64 ./cmd/s3dir
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o s3dir-darwin-arm64 ./cmd/s3dir
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o s3dir-windows-amd64.exe ./cmd/s3dir
+          mkdir -p dist
+          LDFLAGS="-s -w -X main.version=${{ steps.version.outputs.release }}"
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/s3dir-linux-amd64   ./cmd/s3dir
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/s3dir-linux-arm64   ./cmd/s3dir
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/s3dir-darwin-amd64  ./cmd/s3dir
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/s3dir-darwin-arm64  ./cmd/s3dir
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/s3dir-windows-amd64.exe ./cmd/s3dir
 
-          # Create archives
-          tar czf s3dir-linux-amd64.tar.gz s3dir-linux-amd64
-          tar czf s3dir-linux-arm64.tar.gz s3dir-linux-arm64
-          tar czf s3dir-darwin-amd64.tar.gz s3dir-darwin-amd64
-          tar czf s3dir-darwin-arm64.tar.gz s3dir-darwin-arm64
-          zip s3dir-windows-amd64.zip s3dir-windows-amd64.exe
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-          # Generate checksums
-          sha256sum s3dir-*.tar.gz s3dir-*.zip > checksums.txt
-
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-          cat > release_notes.md << 'EOF'
-          ## S3Dir ${{ github.ref_name }}
-
-          ### Installation
-
-          #### Docker
-          ```bash
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/s3dir:${{ github.ref_name }}
-          ```
-
-          #### Binary Download
-          Download the appropriate binary for your platform below.
-
-          #### From Source
-          ```bash
-          git clone https://github.com/${{ github.repository }}
-          cd s3dir
-          git checkout ${{ github.ref_name }}
-          go build -o s3dir ./cmd/s3dir
-          ```
-
-          ### Quick Start
-          ```bash
-          # Extract binary (Linux/macOS example)
-          tar xzf s3dir-linux-amd64.tar.gz
-
-          # Run
-          ./s3dir-linux-amd64
-          ```
-
-          ### Changes
-          See commit history for detailed changes.
-
-          ### Checksums
-          See `checksums.txt` for SHA256 checksums of all artifacts.
-          EOF
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          files: |
-            s3dir-*.tar.gz
-            s3dir-*.zip
-            checksums.txt
-          body_path: release_notes.md
-          draft: false
-          prerelease: false
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.release }}
+          tags: |
+            ghcr.io/stut/s3dir:v${{ steps.version.outputs.release }}
+            ghcr.io/stut/s3dir:latest
+
+      - name: Create release
+        run: |
+          gh release create "v${{ steps.version.outputs.release }}" \
+            --title "v${{ steps.version.outputs.release }}" \
+            --generate-notes \
+            dist/*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,6 @@
-# Build stage
-FROM golang:1.25-alpine AS builder
+# Build stage - cross-compile for the target platform so nothing runs under
+# emulation during multi-arch builds
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git
@@ -17,7 +18,9 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-s -w' -o s3dir ./cmd/s3dir
+ARG VERSION=dev
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X main.version=${VERSION}" -o s3dir ./cmd/s3dir
 
 # Final stage
 FROM alpine:latest

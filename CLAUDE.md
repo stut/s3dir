@@ -210,8 +210,20 @@ aws --endpoint-url=http://localhost:8000 s3 cp --debug large-file s3://bucket/
 
 GitHub Actions workflows in `.github/workflows/`:
 - `ci.yml` - Tests on Ubuntu/macOS with Go 1.24/1.25
-- `docker-publish.yml` - Docker image builds
-- `release.yml` - Release binaries for multiple platforms
+- `docker-publish.yml` - Docker Hub image builds on branch pushes
+- `release.yml` - Manually-dispatched release workflow
+
+### Versioning and releases
+
+The `VERSION` file holds the current version, `X.Y.Z-dev` during development.
+The version is injected at build time via `-ldflags "-X main.version=..."`
+(the Makefile and Dockerfile both do this; a plain `go build` shows "dev").
+
+Releases are cut by running the Release workflow (workflow_dispatch) with a
+`minor` or `major` bump. It strips the `-dev` suffix, commits and tags
+`vX.Y.0`, bumps `VERSION` to the next `-dev` version, builds the platform
+binaries and a multi-arch image pushed to `ghcr.io/stut/s3dir`, and creates a
+GitHub release with generated notes. Do not tag releases by hand.
 
 **Important:**
 - All tests must pass with `-race` flag

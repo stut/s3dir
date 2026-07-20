@@ -15,6 +15,9 @@ import (
 	"github.com/stut/s3dir/pkg/storage"
 )
 
+// version is injected at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -25,6 +28,7 @@ func main() {
 	// Print startup information
 	fmt.Printf("S3Dir - S3-Compatible Directory Server\n")
 	fmt.Printf("========================================\n")
+	fmt.Printf("Version: %s\n", version)
 	fmt.Printf("Data Directory: %s\n", cfg.DataDir)
 	fmt.Printf("Listen Address: %s\n", cfg.Address())
 	fmt.Printf("Authentication: %v\n", cfg.EnableAuth)

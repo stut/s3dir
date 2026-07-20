@@ -3,10 +3,10 @@
 # Binary name
 BINARY_NAME=s3dir
 
-# Build variables
-VERSION?=dev
-BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
-LDFLAGS=-ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
+# Build variables - the version comes from the VERSION file (X.Y.Z-dev during
+# development; the release workflow strips the suffix when releasing)
+VERSION := $(shell cat VERSION)
+LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 
 all: test build
 
@@ -74,7 +74,7 @@ vet:
 ## docker-build: Build Docker image
 docker-build:
 	@echo "Building Docker image..."
-	@docker build -t s3dir:$(VERSION) -t s3dir:latest .
+	@docker build --build-arg VERSION=$(VERSION) -t s3dir:$(VERSION) -t s3dir:latest .
 	@echo "Docker build complete"
 
 ## docker-run: Run Docker container

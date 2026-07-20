@@ -210,7 +210,6 @@ aws --endpoint-url=http://localhost:8000 s3 cp --debug large-file s3://bucket/
 
 GitHub Actions workflows in `.github/workflows/`:
 - `ci.yml` - Tests on Ubuntu/macOS with Go 1.24/1.25
-- `docker-publish.yml` - Docker Hub image builds on branch pushes
 - `release.yml` - Manually-dispatched release workflow
 
 ### Versioning and releases

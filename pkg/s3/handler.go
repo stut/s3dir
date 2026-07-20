@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -65,21 +66,51 @@ func (h *Handler) handleServiceOperation(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// bucketSubresources are the bucket configuration subresources s3dir
+// recognises but does not implement. GETs receive a stub or the S3 error code
+// a real bucket without that configuration would return; PUTs and DELETEs are
+// accepted as no-ops so clients cannot accidentally create or delete the
+// bucket itself through them
+var bucketSubresources = []string{
+	"accelerate", "acl", "cors", "encryption", "lifecycle", "location",
+	"logging", "notification", "object-lock", "policy", "replication",
+	"requestPayment", "tagging", "versioning", "website",
+}
+
+// hasBucketSubresource reports whether the query addresses a recognised
+// bucket configuration subresource
+func hasBucketSubresource(query url.Values) bool {
+	for _, sub := range bucketSubresources {
+		if query.Has(sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleBucketOperation handles bucket-level operations
 func (h *Handler) handleBucketOperation(w http.ResponseWriter, r *http.Request, bucket string) {
+	query := r.URL.Query()
+
 	// Check for multipart uploads listing
-	if r.Method == http.MethodGet && r.URL.Query().Has("uploads") {
+	if r.Method == http.MethodGet && query.Has("uploads") {
 		h.listMultipartUploads(w, r, bucket)
 		return
 	}
 
 	// Check for batch delete
-	if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+	if r.Method == http.MethodPost && query.Has("delete") {
 		if h.readOnly {
 			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
 			return
 		}
 		h.deleteObjects(w, r, bucket)
+		return
+	}
+
+	// Bucket configuration subresources
+	if hasBucketSubresource(query) {
+		h.handleBucketSubresource(w, r, bucket)
 		return
 	}
 
@@ -157,6 +188,13 @@ func (h *Handler) handleObjectOperation(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Object subresources (?acl, ?tagging): served as stubs so clients don't
+	// corrupt object data through the plain PUT path
+	if query.Has("acl") || query.Has("tagging") {
+		h.handleObjectSubresource(w, r, bucket, key)
+		return
+	}
+
 	// Standard object operations
 	switch r.Method {
 	case http.MethodGet:
@@ -181,6 +219,78 @@ func (h *Handler) handleObjectOperation(w http.ResponseWriter, r *http.Request, 
 		h.deleteObject(w, r, bucket, key)
 	default:
 		writeError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleBucketSubresource handles requests addressing bucket configuration
+// subresources (?location, ?versioning, ?acl, ?lifecycle, ...)
+func (h *Handler) handleBucketSubresource(w http.ResponseWriter, r *http.Request, bucket string) {
+	if err := h.storage.HeadBucket(bucket); err != nil {
+		writeError(w, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+		return
+	}
+
+	query := r.URL.Query()
+
+	switch r.Method {
+	case http.MethodGet:
+		switch {
+		case query.Has("location"):
+			// Empty value means us-east-1, matching AWS
+			writeXML(w, LocationConstraint{}, http.StatusOK)
+		case query.Has("versioning"):
+			writeXML(w, VersioningConfiguration{}, http.StatusOK)
+		case query.Has("acl"):
+			writeXML(w, ownerFullControlACL(), http.StatusOK)
+		case query.Has("tagging"):
+			writeError(w, "NoSuchTagSet", "The TagSet does not exist", http.StatusNotFound)
+		case query.Has("lifecycle"):
+			writeError(w, "NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist", http.StatusNotFound)
+		case query.Has("cors"):
+			writeError(w, "NoSuchCORSConfiguration", "The CORS configuration does not exist", http.StatusNotFound)
+		case query.Has("policy"):
+			writeError(w, "NoSuchBucketPolicy", "The bucket policy does not exist", http.StatusNotFound)
+		case query.Has("encryption"):
+			writeError(w, "ServerSideEncryptionConfigurationNotFoundError", "The server side encryption configuration was not found", http.StatusNotFound)
+		case query.Has("object-lock"):
+			writeError(w, "ObjectLockConfigurationNotFoundError", "Object Lock configuration does not exist for this bucket", http.StatusNotFound)
+		default:
+			writeError(w, "NotImplemented", "This bucket subresource is not implemented", http.StatusNotImplemented)
+		}
+	case http.MethodPut:
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		// Accept configuration writes as no-ops
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		// Accept configuration deletes as no-ops (this must not delete the bucket)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ownerFullControlACL is the stub ACL granting the s3dir owner full control
+func ownerFullControlACL() AccessControlPolicy {
+	return AccessControlPolicy{
+		Owner: Owner{ID: "s3dir", DisplayName: "s3dir"},
+		AccessControlList: AccessControlList{
+			Grants: []Grant{{
+				Grantee: Grantee{
+					XMLNSXSI:    "http://www.w3.org/2001/XMLSchema-instance",
+					Type:        "CanonicalUser",
+					ID:          "s3dir",
+					DisplayName: "s3dir",
+				},
+				Permission: "FULL_CONTROL",
+			}},
+		},
 	}
 }
 
@@ -211,19 +321,39 @@ func (h *Handler) listBuckets(w http.ResponseWriter, r *http.Request) {
 	writeXML(w, response, http.StatusOK)
 }
 
-// listObjects lists objects in a bucket
+// listObjects lists objects in a bucket, handling both ListObjects (v1) and
+// ListObjectsV2 requests
 func (h *Handler) listObjects(w http.ResponseWriter, r *http.Request, bucket string) {
 	query := r.URL.Query()
 	prefix := query.Get("prefix")
 	delimiter := query.Get("delimiter")
 	maxKeys := 1000
 	if mk := query.Get("max-keys"); mk != "" {
-		if n, err := strconv.Atoi(mk); err == nil && n > 0 {
+		if n, err := strconv.Atoi(mk); err == nil && n >= 0 {
 			maxKeys = n
 		}
 	}
 
-	objects, commonPrefixes, err := h.storage.ListObjects(bucket, prefix, delimiter, maxKeys)
+	// Determine where to resume from. V1 uses marker; V2 uses an opaque
+	// continuation token (base64 of the last returned entry), falling back to
+	// start-after on the first page
+	listV2 := query.Get("list-type") == "2"
+	marker := query.Get("marker")
+	continuationToken := query.Get("continuation-token")
+	startAfter := query.Get("start-after")
+	if listV2 {
+		marker = startAfter
+		if continuationToken != "" {
+			decoded, err := base64.StdEncoding.DecodeString(continuationToken)
+			if err != nil {
+				writeError(w, "InvalidArgument", "The continuation token provided is incorrect", http.StatusBadRequest)
+				return
+			}
+			marker = string(decoded)
+		}
+	}
+
+	objects, commonPrefixes, truncated, nextMarker, err := h.storage.ListObjectsPage(bucket, prefix, delimiter, marker, maxKeys)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
@@ -249,12 +379,34 @@ func (h *Handler) listObjects(w http.ResponseWriter, r *http.Request, bucket str
 		prefixes = append(prefixes, CommonPrefix{Prefix: cp})
 	}
 
+	if listV2 {
+		response := ListObjectsV2Response{
+			Name:              bucket,
+			Prefix:            prefix,
+			Delimiter:         delimiter,
+			StartAfter:        startAfter,
+			ContinuationToken: continuationToken,
+			KeyCount:          len(contents) + len(prefixes),
+			MaxKeys:           maxKeys,
+			IsTruncated:       truncated,
+			Contents:          contents,
+			CommonPrefixes:    prefixes,
+		}
+		if truncated {
+			response.NextContinuationToken = base64.StdEncoding.EncodeToString([]byte(nextMarker))
+		}
+		writeXML(w, response, http.StatusOK)
+		return
+	}
+
 	response := ListObjectsResponse{
 		Name:           bucket,
 		Prefix:         prefix,
 		Delimiter:      delimiter,
+		Marker:         marker,
+		NextMarker:     nextMarker,
 		MaxKeys:        maxKeys,
-		IsTruncated:    false,
+		IsTruncated:    truncated,
 		Contents:       contents,
 		CommonPrefixes: prefixes,
 	}
@@ -262,9 +414,105 @@ func (h *Handler) listObjects(w http.ResponseWriter, r *http.Request, bucket str
 	writeXML(w, response, http.StatusOK)
 }
 
-// getObject retrieves an object
+// setObjectHeaders sets the standard response headers for an object
+func setObjectHeaders(w http.ResponseWriter, info *storage.ObjectInfo) {
+	contentType := info.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", info.ETag)
+	w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
+	w.Header().Set("Accept-Ranges", "bytes")
+	for name, value := range info.UserMetadata {
+		w.Header().Set("x-amz-meta-"+name, value)
+	}
+}
+
+// checkNotModified evaluates the If-None-Match and If-Modified-Since request
+// headers against the object, reporting whether a 304 should be returned.
+// If-None-Match takes precedence when present, per RFC 9110
+func checkNotModified(r *http.Request, info *storage.ObjectInfo) bool {
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if inm == "*" {
+			return true
+		}
+		for _, candidate := range strings.Split(inm, ",") {
+			candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "W/")
+			if candidate == info.ETag {
+				return true
+			}
+		}
+		return false
+	}
+
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if t, err := http.ParseTime(ims); err == nil {
+			// HTTP dates have second precision
+			return !info.LastModified.Truncate(time.Second).After(t)
+		}
+	}
+
+	return false
+}
+
+// parseRangeHeader parses a single Range request header against an object of
+// the given size. valid is false for headers that should be ignored (malformed
+// or multi-range); satisfiable is false when a valid range lies outside the
+// object and a 416 must be returned
+func parseRangeHeader(value string, size int64) (start, length int64, valid, satisfiable bool) {
+	spec, ok := strings.CutPrefix(value, "bytes=")
+	if !ok || strings.Contains(spec, ",") {
+		return 0, 0, false, false
+	}
+
+	startStr, endStr, ok := strings.Cut(spec, "-")
+	if !ok {
+		return 0, 0, false, false
+	}
+
+	if startStr == "" {
+		// Suffix range: last N bytes
+		suffix, err := strconv.ParseInt(endStr, 10, 64)
+		if err != nil || suffix < 0 {
+			return 0, 0, false, false
+		}
+		if suffix == 0 || size == 0 {
+			return 0, 0, true, false
+		}
+		if suffix > size {
+			suffix = size
+		}
+		return size - suffix, suffix, true, true
+	}
+
+	first, err := strconv.ParseInt(startStr, 10, 64)
+	if err != nil || first < 0 {
+		return 0, 0, false, false
+	}
+
+	last := size - 1
+	if endStr != "" {
+		last, err = strconv.ParseInt(endStr, 10, 64)
+		if err != nil || last < first {
+			return 0, 0, false, false
+		}
+		if last > size-1 {
+			last = size - 1
+		}
+	}
+
+	if first >= size {
+		return 0, 0, true, false
+	}
+
+	return first, last - first + 1, true, true
+}
+
+// getObject retrieves an object, honouring Range and conditional request
+// headers
 func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	reader, info, err := h.storage.GetObject(bucket, key)
+	info, err := h.storage.HeadObject(bucket, key)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, "NoSuchKey", "The specified key does not exist", http.StatusNotFound)
@@ -273,13 +521,54 @@ func (h *Handler) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		}
 		return
 	}
+
+	if checkNotModified(r, info) {
+		w.Header().Set("ETag", info.ETag)
+		w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// Ranged read
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		start, length, valid, satisfiable := parseRangeHeader(rangeHeader, info.Size)
+		if valid {
+			if !satisfiable {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size))
+				writeError(w, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+
+			reader, _, err := h.storage.GetObjectRange(bucket, key, start, length)
+			if err != nil {
+				writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer reader.Close()
+
+			setObjectHeaders(w, info)
+			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, info.Size))
+			w.WriteHeader(http.StatusPartialContent)
+
+			if _, err := io.Copy(w, reader); err != nil {
+				// Error writing to response - headers are already sent
+				return
+			}
+			return
+		}
+		// Malformed range headers are ignored and the full object returned
+	}
+
+	reader, _, err := h.storage.GetObject(bucket, key)
+	if err != nil {
+		writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		return
+	}
 	defer reader.Close()
 
-	// Set headers
-	w.Header().Set("Content-Type", "application/octet-stream")
+	setObjectHeaders(w, info)
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	w.Header().Set("ETag", info.ETag)
-	w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
 
 	// Copy object data to response
 	if _, err := io.Copy(w, reader); err != nil {
@@ -301,12 +590,31 @@ func (h *Handler) headObject(w http.ResponseWriter, r *http.Request, bucket, key
 		return
 	}
 
-	// Set headers
-	w.Header().Set("Content-Type", "application/octet-stream")
+	if checkNotModified(r, info) {
+		w.Header().Set("ETag", info.ETag)
+		w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	setObjectHeaders(w, info)
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	w.Header().Set("ETag", info.ETag)
-	w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusOK)
+}
+
+// userMetadataFromHeader extracts x-amz-meta-* headers into a metadata map
+// with lowercased names
+func userMetadataFromHeader(header http.Header) map[string]string {
+	var meta map[string]string
+	for name, values := range header {
+		if strings.HasPrefix(name, "X-Amz-Meta-") && len(values) > 0 {
+			if meta == nil {
+				meta = make(map[string]string)
+			}
+			meta[strings.ToLower(strings.TrimPrefix(name, "X-Amz-Meta-"))] = values[0]
+		}
+	}
+	return meta
 }
 
 // putObject stores an object
@@ -317,13 +625,13 @@ func (h *Handler) putObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		return
 	}
 
-	if err := h.storage.PutObject(bucket, key, r.Body, contentLength); err != nil {
+	etag, err := h.storage.PutObjectWithMetadata(bucket, key, r.Body, contentLength,
+		r.Header.Get("Content-Type"), userMetadataFromHeader(r.Header))
+	if err != nil {
 		writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Generate ETag (simplified)
-	etag := fmt.Sprintf("\"%x\"", time.Now().Unix())
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusOK)
 }
@@ -432,6 +740,46 @@ func writeError(w http.ResponseWriter, code, message string, statusCode int) {
 	writeXML(w, errorResponse, statusCode)
 }
 
+// handleObjectSubresource handles requests addressing object subresources
+// (?acl, ?tagging)
+func (h *Handler) handleObjectSubresource(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if _, err := h.storage.HeadObject(bucket, key); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, "NoSuchKey", "The specified key does not exist", http.StatusNotFound)
+		} else {
+			writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	query := r.URL.Query()
+
+	switch r.Method {
+	case http.MethodGet:
+		if query.Has("acl") {
+			writeXML(w, ownerFullControlACL(), http.StatusOK)
+		} else {
+			// Objects have no tags; an empty TagSet is the AWS response
+			writeXML(w, Tagging{}, http.StatusOK)
+		}
+	case http.MethodPut:
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		// Accept ACL and tagging writes as no-ops
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		if h.readOnly {
+			writeError(w, "AccessDenied", "Read-only mode", http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // parseCopySource parses an x-amz-copy-source header value into bucket and key.
 // The value is "/{bucket}/{key}" or "{bucket}/{key}" and may be URL-encoded
 func parseCopySource(source string) (bucket, key string, err error) {
@@ -488,7 +836,9 @@ func (h *Handler) copyObject(w http.ResponseWriter, r *http.Request, bucket, key
 		return
 	}
 
-	info, err := h.storage.CopyObject(srcBucket, srcKey, bucket, key)
+	replaceMetadata := strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE")
+	info, err := h.storage.CopyObjectWithMetadata(srcBucket, srcKey, bucket, key,
+		replaceMetadata, r.Header.Get("Content-Type"), userMetadataFromHeader(r.Header))
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, "NoSuchKey", "The specified key does not exist", http.StatusNotFound)
@@ -581,7 +931,8 @@ func (h *Handler) deleteObjects(w http.ResponseWriter, r *http.Request, bucket s
 
 // initiateMultipartUpload initiates a multipart upload
 func (h *Handler) initiateMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	uploadID, err := h.storage.InitiateMultipartUpload(bucket, key)
+	uploadID, err := h.storage.InitiateMultipartUploadWithMetadata(bucket, key,
+		r.Header.Get("Content-Type"), userMetadataFromHeader(r.Header))
 	if err != nil {
 		writeError(w, "InternalError", err.Error(), http.StatusInternalServerError)
 		return

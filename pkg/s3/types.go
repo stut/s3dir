@@ -26,16 +26,34 @@ type Owner struct {
 	DisplayName string `xml:"DisplayName"`
 }
 
-// ListObjectsResponse is the response for ListObjects operation
+// ListObjectsResponse is the response for the ListObjects (v1) operation
 type ListObjectsResponse struct {
 	XMLName        xml.Name       `xml:"ListBucketResult"`
 	Name           string         `xml:"Name"`
 	Prefix         string         `xml:"Prefix,omitempty"`
 	Delimiter      string         `xml:"Delimiter,omitempty"`
+	Marker         string         `xml:"Marker"`
+	NextMarker     string         `xml:"NextMarker,omitempty"`
 	MaxKeys        int            `xml:"MaxKeys"`
 	IsTruncated    bool           `xml:"IsTruncated"`
 	Contents       []Object       `xml:"Contents"`
 	CommonPrefixes []CommonPrefix `xml:"CommonPrefixes,omitempty"`
+}
+
+// ListObjectsV2Response is the response for the ListObjectsV2 operation
+type ListObjectsV2Response struct {
+	XMLName               xml.Name       `xml:"ListBucketResult"`
+	Name                  string         `xml:"Name"`
+	Prefix                string         `xml:"Prefix,omitempty"`
+	Delimiter             string         `xml:"Delimiter,omitempty"`
+	StartAfter            string         `xml:"StartAfter,omitempty"`
+	ContinuationToken     string         `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string         `xml:"NextContinuationToken,omitempty"`
+	KeyCount              int            `xml:"KeyCount"`
+	MaxKeys               int            `xml:"MaxKeys"`
+	IsTruncated           bool           `xml:"IsTruncated"`
+	Contents              []Object       `xml:"Contents"`
+	CommonPrefixes        []CommonPrefix `xml:"CommonPrefixes,omitempty"`
 }
 
 // Object represents an S3 object
@@ -129,6 +147,62 @@ type ListMultipartUploadsResult struct {
 	MaxUploads         int      `xml:"MaxUploads"`
 	IsTruncated        bool     `xml:"IsTruncated"`
 	Uploads            []Upload `xml:"Upload"`
+}
+
+// LocationConstraint is the response for GetBucketLocation. An empty value
+// means the default region (us-east-1), matching AWS behaviour
+type LocationConstraint struct {
+	XMLName xml.Name `xml:"LocationConstraint"`
+	Value   string   `xml:",chardata"`
+}
+
+// VersioningConfiguration is the response for GetBucketVersioning. An empty
+// configuration means versioning has never been enabled
+type VersioningConfiguration struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+}
+
+// AccessControlPolicy is the response for GetBucketAcl and GetObjectAcl
+type AccessControlPolicy struct {
+	XMLName           xml.Name          `xml:"AccessControlPolicy"`
+	Owner             Owner             `xml:"Owner"`
+	AccessControlList AccessControlList `xml:"AccessControlList"`
+}
+
+// AccessControlList contains the grants of an access control policy
+type AccessControlList struct {
+	Grants []Grant `xml:"Grant"`
+}
+
+// Grant represents a single ACL grant
+type Grant struct {
+	Grantee    Grantee `xml:"Grantee"`
+	Permission string  `xml:"Permission"`
+}
+
+// Grantee identifies who a grant applies to
+type Grantee struct {
+	XMLNSXSI    string `xml:"xmlns:xsi,attr"`
+	Type        string `xml:"xsi:type,attr"`
+	ID          string `xml:"ID"`
+	DisplayName string `xml:"DisplayName"`
+}
+
+// Tagging is the response for GetObjectTagging
+type Tagging struct {
+	XMLName xml.Name `xml:"Tagging"`
+	TagSet  TagSet   `xml:"TagSet"`
+}
+
+// TagSet contains the tags of a tagging configuration
+type TagSet struct {
+	Tags []Tag `xml:"Tag"`
+}
+
+// Tag is a single key/value tag
+type Tag struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
 }
 
 // CopyObjectResult is the response for CopyObject
